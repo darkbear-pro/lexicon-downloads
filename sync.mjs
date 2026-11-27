@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { setTimeout } from "node:timers/promises";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
@@ -43,7 +44,9 @@ if (
 
 const temporary = await mkdtemp(path.join(tmpdir(), "lexicon-mirror-"));
 try {
-  let current = (await releases()).find((release) => release.tag_name === tag);
+  const current = (await releases()).find(
+    (release) => release.tag_name === tag,
+  );
   const pending = [];
   for (const os of platforms) {
     const filename = files[os];
@@ -78,7 +81,7 @@ try {
       "release",
       "create",
       tag,
-      "--draft",
+      ...pending,
       "--target",
       "main",
       "--title",
@@ -87,19 +90,41 @@ try {
       `Установщики с [сайта Lexicon](${site}).`,
       ...(tag.includes("-qa.") ? ["--prerelease", "--latest=false"] : []),
     );
-    current = (await releases()).find((release) => release.tag_name === tag);
-    if (!current) throw Error("Черновик релиза не найден");
+  } else {
+    if (pending.length) await gh("release", "upload", tag, ...pending);
+    if (current.draft) await gh("release", "edit", tag, "--draft=false");
   }
-  if (pending.length) await gh("release", "upload", tag, ...pending);
-  if (current.draft) await gh("release", "edit", tag, "--draft=false");
 } finally {
   await rm(temporary, { recursive: true, force: true });
 }
 
 const counts = { mac: 0, win: 0 };
-const published = (await releases()).filter(
-  (release) => !release.draft && tagPattern.test(release.tag_name),
-);
+let published;
+for (const delay of [0, 1000, 2000, 4000, 8000]) {
+  await setTimeout(delay);
+  published = (await releases()).filter(
+    (release) => !release.draft && tagPattern.test(release.tag_name),
+  );
+  const inCurrentRelease = published.find(
+    (release) => release.tag_name === tag,
+  );
+  if (
+    platforms.every((os) =>
+      inCurrentRelease?.assets.some(
+        (asset) =>
+          asset.name === files[os] &&
+          asset.state === "uploaded" &&
+          asset.digest === digests[os],
+      ),
+    )
+  )
+    break;
+  published = null;
+}
+if (!published)
+  throw Error(
+    "В публичном релизе отсутствует проверенный комплект установщиков",
+  );
 for (const release of published) {
   for (const asset of release.assets) {
     const os = platforms.find((platform) =>
@@ -111,20 +136,6 @@ for (const release of published) {
     counts[os] += asset.download_count;
   }
 }
-const publishedRelease = published.find((release) => release.tag_name === tag);
-if (
-  !platforms.every((os) =>
-    publishedRelease?.assets.some(
-      (asset) =>
-        asset.name === files[os] &&
-        asset.state === "uploaded" &&
-        asset.digest === digests[os],
-    ),
-  )
-)
-  throw Error(
-    "В публичном релизе отсутствует проверенный комплект установщиков",
-  );
 await writeFile(
   "downloads.json",
   JSON.stringify({ tag, counts }, null, 2) + "\n",
